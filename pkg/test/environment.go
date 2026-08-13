@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/karpenter/pkg/controllers/nodeoverlay"
 
 	"github.com/patrickmn/go-cache"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	coretest "sigs.k8s.io/karpenter/pkg/test"
 
@@ -85,6 +86,7 @@ type Environment struct {
 	NodeBootstrappingAPI        *fake.NodeBootstrappingAPI
 	AKSMachinesAPI              *fake.AKSMachinesAPI
 	AKSAgentPoolsAPI            *fake.AKSAgentPoolsAPI
+	DynamicInterface            dynamic.Interface
 
 	// Fake data stores for the APIs
 	AKSDataStorage *fake.AKSDataStorage
@@ -206,9 +208,9 @@ func NewRegionalEnvironment(ctx context.Context, env *coretest.Environment, regi
 	var aksMachinesBatchAPI aksmachinesheaderbatch.AKSMachinesHeaderBatchAPI
 	if testOptions.ProvisionMode == consts.ProvisionModeAKSMachineAPIHeaderBatch {
 		aksMachinesBatchAPI = aksmachinesheaderbatch.NewClient(ctx, aksMachinesAPI, batcher.Options{
-			IdleTimeout:  time.Duration(testOptions.BatchIdleTimeoutMS) * time.Millisecond,
-			MaxTimeout:   time.Duration(testOptions.BatchMaxTimeoutMS) * time.Millisecond,
-			MaxBatchSize: testOptions.MaxBatchSize,
+			IdleTimeout:  testOptions.ProviderBatchIdleDuration,
+			MaxTimeout:   testOptions.ProviderBatchMaxDuration,
+			MaxBatchSize: testOptions.ProviderBatchMaxSize,
 		})
 	}
 
@@ -315,6 +317,7 @@ func NewRegionalEnvironment(ctx context.Context, env *coretest.Environment, regi
 		NodeBootstrappingAPI:        nodeBootstrappingAPI,
 		AKSMachinesAPI:              aksMachinesAPI,
 		AKSAgentPoolsAPI:            aksAgentPoolsAPI,
+		DynamicInterface:            dynamic.NewForConfigOrDie(env.Config),
 
 		AKSDataStorage: aksDataStorage,
 
