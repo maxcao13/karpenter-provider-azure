@@ -21,6 +21,7 @@ import (
 
 	"github.com/awslabs/operatorpkg/controller"
 	"github.com/awslabs/operatorpkg/status"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -57,13 +58,17 @@ func NewControllers(
 	nodeImageProvider imagefamily.NodeImageProvider,
 	instanceTypesProvider instancetypeprovider.Provider,
 	inClusterKubernetesInterface kubernetes.Interface,
+	managedKubernetesInterface kubernetes.Interface,
+	managedDynamicInterface dynamic.Interface,
 	subnetsClient azapi.SubnetsAPI,
 	diskEncryptionSetsClient azapi.DiskEncryptionSetsAPI,
 	parsedDiskEncryptionSetID *arm.ResourceID,
+	networkPolicy string,
+	networkPlugin string,
 ) []controller.Controller {
 	controllers := []controller.Controller{
 		nodeclasshash.NewController(kubeClient),
-		nodeclassstatus.NewController(kubeClient, kubernetesVersionProvider, nodeImageProvider, inClusterKubernetesInterface, subnetsClient, diskEncryptionSetsClient, parsedDiskEncryptionSetID),
+		nodeclassstatus.NewController(kubeClient, kubernetesVersionProvider, nodeImageProvider, inClusterKubernetesInterface, managedKubernetesInterface, managedDynamicInterface, subnetsClient, diskEncryptionSetsClient, parsedDiskEncryptionSetID, networkPolicy, networkPlugin),
 		nodeclasstermination.NewController(kubeClient, recorder),
 
 		nodeclaimgarbagecollection.NewInstance(kubeClient, cloudProvider),
@@ -71,7 +76,7 @@ func NewControllers(
 
 		// TODO: nodeclaim tagging
 		inplaceupdate.NewController(kubeClient, vmInstanceProvider, aksMachineInstanceProvider),
-		status.NewController[*v1beta1.AKSNodeClass](kubeClient, mgr.GetEventRecorderFor("karpenter")),
+		status.NewController[*v1beta1.AKSNodeClass](kubeClient, mgr.GetEventRecorderFor("karpenter")), //nolint:staticcheck // SA1019: will be replaced by mgr.GetEventRecorder once operatorpkg is updated
 
 		instancetypecontroller.NewController(instanceTypesProvider),
 	}

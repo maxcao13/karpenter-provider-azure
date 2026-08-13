@@ -185,6 +185,21 @@ type AgentPoolListResult struct {
 	NextLink *string
 }
 
+// AgentPoolNetworkInterface - Configuration of a secondary network interface provisioned on each VM instance in the agent
+// pool. For more information, see https://aka.ms/aks/multi-nic
+type AgentPoolNetworkInterface struct {
+	// Whether accelerated networking is enabled on this secondary NIC. If omitted, this defaults to true only when the agent
+	// pool VM SKU supports accelerated networking. Validation will fail if it is enabled on an unsupported SKU or NIC configuration.
+	EnableAcceleratedNetworking *bool
+
+	// Type of NIC to be provisioned on the VM.
+	Type *AgentPoolNetworkInterfaceType
+
+	// The resource ID of the subnet which will be attached to the secondary network interface. Required when `type` is `Standard`;
+	// must be an empty string (`""`) or omitted when `type` is `Dynamic`.
+	VnetSubnetID *string
+}
+
 // AgentPoolNetworkProfile - Network settings of an agent pool.
 type AgentPoolNetworkProfile struct {
 	// The port ranges that are allowed to access. The specified ranges are allowed to overlap.
@@ -193,8 +208,22 @@ type AgentPoolNetworkProfile struct {
 	// The IDs of the application security groups which agent pool will associate when created.
 	ApplicationSecurityGroups []*string
 
+	// The resource IDs of public IP prefixes for node public IPs. At most one IPv4 and one IPv6 prefix may be specified. Order
+	// does not matter; the RP determines IP version from the referenced resource's publicIPAddressVersion. Requires enableNodePublicIP
+	// to be true on the agent pool. Mutually exclusive with the top-level nodePublicIPPrefixID property. Immutable after node
+	// pool creation. To change prefixes, delete and recreate the node pool. For more information, see https://aka.ms/aks/ipv6-ilpip
+	NodePublicIPPrefixIDs []*string
+
 	// IPTags of instance-level public IPs.
 	NodePublicIPTags []*IPTag
+
+	// Secondary network interface configurations for each VM in the agent pool. Each entry is a template: one physical NIC per
+	// entry is provisioned on every VM instance. These interfaces are created at agent pool creation time and are immutable.
+	// The length of the list must be less than the NIC capacity minus 1 for the VM size of the agent pool (AKS manages the primary
+	// NIC). For example, a Standard_D8a_v4 VM supports up to 4 NICs, so the maximum number of secondary interfaces allowed is
+	// 3. For mixed-SKU VM pools the effective capacity is the minimum across all SKUs: count(secondaryNetworkInterfaces) + 1
+	// <= min(maxNICs). For more information, see https://aka.ms/aks/multi-nic
+	SecondaryNetworkInterfaces []*AgentPoolNetworkInterface
 }
 
 // AgentPoolRecentlyUsedVersion - A historical version that can be used for rollback operations.
@@ -354,6 +383,34 @@ type AzureKeyVaultKms struct {
 	// Resource ID of key vault. When keyVaultNetworkAccess is `Private`, this field is required and must be a valid resource
 	// ID. When keyVaultNetworkAccess is `Public`, leave the field empty.
 	KeyVaultResourceID *string
+}
+
+// BastionProfile - Profile to enable managed Azure Bastion or reference to an existing Bastion for the managed cluster.
+// See https://aka.ms/aks/BastionConnect for more details.
+type BastionProfile struct {
+	// Indicates whether managed bastion is enabled.
+	Enabled *bool
+
+	// The resource ID of the public IP address associated with the managed bastion.
+	// When provided during creation, the managed bastion will reference this existing public IP address instead of creating a
+	// new one.
+	// The referenced public IP address must be in the same subscription and region as the managed cluster.
+	// When not provided during creation, AKS will automatically create a new public IP address.
+	// This field cannot be updated. To change IP address after creation, please disable and re-enable the managed bastion with
+	// the new public IP address.
+	PublicIPAddressID *string
+
+	// The SKU of the managed bastion.
+	// Only Standard and Premium SKUs are supported.
+	// SKU downgrading is not allowed. To downgrade SKU, please disable then re-enable the managed bastion with new SKU.
+	// See https://aka.ms/aks/BastionSKUs for more details.
+	SKU *BastionSKU
+
+	// The scale units of the managed bastion. Default value is 2.
+	ScaleUnits *int32
+
+	// READ-ONLY; The resource ID of the managed bastion associated with the managed cluster.
+	BastionID *string
 }
 
 // ClusterUpgradeSettings - Settings for upgrading a cluster.
@@ -573,6 +630,25 @@ type GuardrailsAvailableVersionsProperties struct {
 
 	// READ-ONLY; Whether the version is preview or stable.
 	Support *GuardrailsSupport
+}
+
+// HardEvictionThreshold - Hard eviction thresholds for kubelet. These thresholds trigger pod eviction when node resources
+// drop below the specified values. Values must be greater than or equal to the documented minimums for each signal. Supported
+// formats are Ki, Mi, Gi, or percentages using %.
+type HardEvictionThreshold struct {
+	// The threshold for available memory below which pod eviction is triggered. Accepts absolute values (e.g. '500Mi') or percentage
+	// values (e.g. '5%'). Absolute values must be greater than or equal to 100Mi. Percentage values must be greater than or equal
+	// to 2%.
+	MemoryAvailable *string
+
+	// The threshold for available node filesystem space below which pod eviction is triggered. Accepts absolute values (e.g.
+	// '1Gi') or percentage values (e.g. '10%'). Must be greater than or equal to the system default of 10%.
+	NodeFsAvailable *string
+
+	// The threshold for available inodes on the node filesystem below which pod eviction is triggered. Accepts absolute inode
+	// counts (e.g. '100000') or percentage values (e.g. '5%'). Percentage values must be greater than or equal to the system
+	// default of 5%.
+	NodeFsInodesFree *string
 }
 
 // IPTag - Contains the IPTag associated with the object.
@@ -832,6 +908,18 @@ type JWTAuthenticatorValidationRule struct {
 	Message *string
 }
 
+// KubeReserved - Kube-reserved values for kubelet. When a value is not set, the system-computed default based on VM size
+// is used. See [AKS node resource reservations](https://aka.ms/aks/nodereservations) for details on computed defaults. Only
+// applicable for Linux nodepools.
+type KubeReserved struct {
+	// The amount of CPU reserved for Kubernetes system daemons, in millicores. Must be greater than or equal to 140. For example,
+	// a value of 200 means 200m (0.2 CPU cores).
+	CPUMillicores *int32
+
+	// The amount of memory reserved for Kubernetes system daemons, in MiB. Must be greater than or equal to 750.
+	MemoryMB *int32
+}
+
 // KubeletConfig - Kubelet configurations of agent nodes. See [AKS custom node configuration](https://docs.microsoft.com/azure/aks/custom-node-configuration)
 // for more details.
 type KubeletConfig struct {
@@ -858,6 +946,10 @@ type KubeletConfig struct {
 	// If set to true it will make the Kubelet fail to start if swap is enabled on the node.
 	FailSwapOn *bool
 
+	// Hard eviction thresholds for kubelet. When a threshold is not set, the system default is used. See [AKS node resource reservations](https://aka.ms/aks/nodereservations)
+	// for details on computed defaults. Only applicable for Linux nodepools.
+	HardEvictionThreshold *HardEvictionThreshold
+
 	// The percent of disk usage after which image garbage collection is always run. To disable image garbage collection, set
 	// to 100. The default is 85%
 	ImageGcHighThreshold *int32
@@ -865,6 +957,11 @@ type KubeletConfig struct {
 	// The percent of disk usage before which image garbage collection is never run. This cannot be set higher than imageGcHighThreshold.
 	// The default is 80%
 	ImageGcLowThreshold *int32
+
+	// Kube-reserved values for kubelet. When a value is not set, the system-computed default based on VM size is used. See [AKS
+	// node resource reservations](https://aka.ms/aks/nodereservations) for details on computed defaults. Only applicable for
+	// Linux nodepools.
+	KubeReserved *KubeReserved
 
 	// The maximum number of processes per pod.
 	PodMaxPids *int32
@@ -1403,6 +1500,80 @@ type MaintenanceWindow struct {
 	UTCOffset *string
 }
 
+// MaintenanceWindowResource - A maintenance window is a resource-group-scoped resource that defines a reusable
+// maintenance schedule which can be linked to maintenance configurations on one
+// or more managed clusters.
+// For more information, see https://aka.ms/aks/maintenance-windows.
+type MaintenanceWindowResource struct {
+	// REQUIRED; The geo-location where the resource lives
+	Location *string
+
+	// Properties of a maintenance window.
+	Properties *MaintenanceWindowResourceProperties
+
+	// Resource tags.
+	Tags map[string]*string
+
+	// READ-ONLY; Fully qualified resource ID for the resource. Ex - /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/{resourceProviderNamespace}/{resourceType}/{resourceName}
+	ID *string
+
+	// READ-ONLY; The name of the resource
+	Name *string
+
+	// READ-ONLY; Azure Resource Manager metadata containing createdBy and modifiedBy information.
+	SystemData *SystemData
+
+	// READ-ONLY; The type of the resource. E.g. "Microsoft.Compute/virtualMachines" or "Microsoft.Storage/storageAccounts"
+	Type *string
+}
+
+// MaintenanceWindowResourceListResult - The response of a MaintenanceWindowResource list operation.
+type MaintenanceWindowResourceListResult struct {
+	// REQUIRED; The MaintenanceWindowResource items on this page
+	Value []*MaintenanceWindowResource
+
+	// The link to the next page of items
+	NextLink *string
+}
+
+// MaintenanceWindowResourceProperties - Properties of a maintenance window.
+// For more information, see https://aka.ms/aks/maintenance-windows.
+type MaintenanceWindowResourceProperties struct {
+	// REQUIRED; Length of the maintenance window in hours.
+	DurationHours *int32
+
+	// REQUIRED; Recurrence schedule for the maintenance window. One and only one of the schedule
+	// types should be specified: 'daily', 'weekly', 'absoluteMonthly', or 'relativeMonthly'.
+	Schedule *Schedule
+
+	// REQUIRED; The start time of the maintenance window. Accepted values are from '00:00' to
+	// '23:59'. 'utcOffset' applies to this field. For example: '02:00' with
+	// 'utcOffset: +02:00' means UTC time '00:00'.
+	StartTime *string
+
+	// Date ranges during which maintenance is not allowed. 'utcOffset' applies to
+	// these dates. For example, with 'utcOffset: +02:00' and a date span of
+	// '2026-12-23' to '2027-01-03', maintenance will be blocked from
+	// '2026-12-22 22:00' to '2027-01-03 22:00' in UTC time.
+	NotAllowedDates []*DateSpan
+
+	// The date the maintenance window activates. If the current date is before this
+	// date, the maintenance window is inactive and will not be used. If not specified,
+	// the maintenance window will be active right away.
+	StartDate *time.Time
+
+	// The UTC offset in format +/-HH:mm. For example, '+05:30' for IST and '-07:00'
+	// for PST. If not specified, the default is '+00:00'.
+	// Note: this is a static offset and does not adjust for Daylight Saving Time.
+	// Customers in DST-observing regions should pick the offset that matches their
+	// preferred wall-clock time year-round; the maintenance window will shift by one
+	// hour relative to local time when DST starts or ends.
+	UTCOffset *string
+
+	// READ-ONLY; The provisioning state of the maintenance window.
+	ProvisioningState *ResourceProvisioningState
+}
+
 // ManagedCluster - Managed cluster.
 type ManagedCluster struct {
 	// REQUIRED; The geo-location where the resource lives
@@ -1650,7 +1821,8 @@ type ManagedClusterAgentPoolProfile struct {
 	// Network-related settings of an agent pool.
 	NetworkProfile *AgentPoolNetworkProfile
 
-	// The version of node image
+	// The version of the node image. Setting this value triggers an agentPool rollback.
+	// Only values from `recentlyUsedVersions` are allowed.
 	NodeImageVersion *string
 
 	// Taints added on the nodes during creation that will not be reconciled by AKS. These taints will not be reconciled by AKS
@@ -1878,7 +2050,8 @@ type ManagedClusterAgentPoolProfileProperties struct {
 	// Network-related settings of an agent pool.
 	NetworkProfile *AgentPoolNetworkProfile
 
-	// The version of node image
+	// The version of the node image. Setting this value triggers an agentPool rollback.
+	// Only values from `recentlyUsedVersions` are allowed.
 	NodeImageVersion *string
 
 	// Taints added on the nodes during creation that will not be reconciled by AKS. These taints will not be reconciled by AKS
@@ -2633,6 +2806,12 @@ type ManagedClusterProperties struct {
 	// The Resource ID of the disk encryption set to use for enabling encryption at rest. This is of the form: '/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Compute/diskEncryptionSets/{encryptionSetName}'
 	DiskEncryptionSetID *string
 
+	// Whether to enable FIPS mode at the cluster level. When enabled, this setting enforces FIPS compliance for all AKS-managed
+	// components, such as the node operating system, addons, and [managed containerized components](https://aka.ms/aks/components/docs).
+	// See [Enable cluster-wide FIPS](https://aka.ms/aks/fips) for more details. When this property is enabled, all node pools
+	// in the cluster must also be FIPS-enabled.
+	EnableFIPS *bool
+
 	// Enable namespace as Azure resource. The default value is false. It can be enabled/disabled on creation and updating of
 	// the managed cluster. See [https://aka.ms/NamespaceARMResource](https://aka.ms/NamespaceARMResource) for more details on
 	// Namespace as a ARM Resource.
@@ -2678,6 +2857,9 @@ type ManagedClusterProperties struct {
 
 	// The network configuration profile.
 	NetworkProfile *NetworkProfile
+
+	// Node disruption profile for a managed cluster.
+	NodeDisruptionProfile *NodeDisruptionProfile
 
 	// Node provisioning settings that apply to the whole cluster.
 	NodeProvisioningProfile *ManagedClusterNodeProvisioningProfile
@@ -3081,9 +3263,6 @@ type ManagedClusterStorageProfileBlobCSIDriver struct {
 type ManagedClusterStorageProfileDiskCSIDriver struct {
 	// Whether to enable AzureDisk CSI Driver. The default value is true.
 	Enabled *bool
-
-	// The version of AzureDisk CSI Driver. The default value is v1.
-	Version *string
 }
 
 // ManagedClusterStorageProfileFileCSIDriver - AzureFile CSI Driver settings for the storage profile.
@@ -3438,6 +3617,10 @@ type NetworkProfile struct {
 	// aka.ms/aksadvancednetworking.
 	AdvancedNetworking *AdvancedNetworking
 
+	// Profile of the Bastion Host associated with the managed cluster.
+	// See https://aka.ms/aks/BastionConnect for more details.
+	BastionProfile *BastionProfile
+
 	// An IP address assigned to the Kubernetes DNS service. It must be within the Kubernetes service address range specified
 	// in serviceCidr.
 	DNSServiceIP *string
@@ -3550,6 +3733,15 @@ type NetworkProfileKubeProxyConfigIpvsConfig struct {
 
 	// The timeout value used for IPVS UDP packets in seconds. Must be a positive integer value.
 	UDPTimeoutSeconds *int32
+}
+
+// NodeDisruptionProfile - Node disruption profile for a managed cluster.
+type NodeDisruptionProfile struct {
+	// The policy configuration for when to allow certain operations which require node re-image and trigger redeployment. For
+	// example, some operations, such as updating the .properties.ManagedClusterSecurityProfile.customCATrustCertificates field
+	// on an existing managed cluster, trigger rolling updates of the nodes. This setting allows control over when such updates
+	// are accepted. The default is 'Allow'. For a full list of covered operations see aka.ms/aks/nodedisruptionpolicy".
+	NodeDisruptionPolicy *NodeDisruptionPolicy
 }
 
 // NodeImageVersion - node image version profile for given major.minor.patch release.

@@ -56,6 +56,20 @@ const (
 	InstanceTypesCacheTTL = 23 * time.Hour
 )
 
+// instanceTypeParameters contains the resolved set of AKSNodeClass fields that affect
+// instance-type construction. The instance-type cache key is derived by hashing this
+// struct; adding a new field here automatically incorporates it into the key.
+type instanceTypeParameters struct {
+	ImageFamily              string
+	OSDiskSizeGB             int32
+	MaxPods                  int32
+	EncryptionAtHost         bool
+	GPUMode                  v1beta1.GPUMode
+	ArtifactStreamingEnabled bool
+	FIPSMode                 v1beta1.FIPSMode
+	LocalDNSEnabled          bool
+}
+
 type Provider interface {
 	LivenessProbe(*http.Request) error
 	List(context.Context, *v1beta1.AKSNodeClass) ([]*cloudprovider.InstanceType, error)
@@ -122,21 +136,22 @@ func (p *DefaultProvider) List(
 		return nil, fmt.Errorf("no instance types found")
 	}
 
-	kc := nodeClass.Spec.Kubelet
-
 	// Compute fully initialized instance types hash key
-	kcHash, _ := hashstructure.Hash(kc, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
-	key := fmt.Sprintf("%d-%d-%016x-%s-%d-%d-%t-%t-%s-%t",
+	instanceTypeParams := &instanceTypeParameters{
+		ImageFamily:              lo.FromPtr(nodeClass.Spec.ImageFamily),
+		OSDiskSizeGB:             lo.FromPtr(nodeClass.Spec.OSDiskSizeGB),
+		MaxPods:                  utils.GetMaxPods(nodeClass, options.FromContext(ctx).NetworkPlugin, options.FromContext(ctx).NetworkPluginMode),
+		EncryptionAtHost:         nodeClass.GetEncryptionAtHost(),
+		GPUMode:                  nodeClass.GetGPUMode(),
+		ArtifactStreamingEnabled: nodeClass.IsArtifactStreamingExplicitlyEnabled(),
+		FIPSMode:                 lo.FromPtr(nodeClass.Spec.FIPSMode),
+		LocalDNSEnabled:          nodeClass.IsLocalDNSEnabled(),
+	}
+	paramsHash, _ := hashstructure.Hash(instanceTypeParams, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
+	key := fmt.Sprintf("%d-%d-%016x",
 		p.instanceTypesSeqNum,
 		p.unavailableOfferings.SeqNum,
-		kcHash,
-		lo.FromPtr(nodeClass.Spec.ImageFamily),
-		lo.FromPtr(nodeClass.Spec.OSDiskSizeGB),
-		utils.GetMaxPods(nodeClass, options.FromContext(ctx).NetworkPlugin, options.FromContext(ctx).NetworkPluginMode),
-		nodeClass.GetEncryptionAtHost(),
-		nodeClass.IsLocalDNSEnabled(),
-		string(nodeClass.GetGPUMode()),
-		nodeClass.IsArtifactStreamingExplicitlyEnabled(),
+		paramsHash,
 	)
 	if item, ok := p.instanceTypesCache.Get(key); ok {
 		// Ensure what's returned from this function is a shallow-copy of the slice (not a deep-copy of the data itself)
@@ -159,16 +174,12 @@ func (p *DefaultProvider) List(
 			continue
 		}
 		instanceTypeZones := p.instanceTypeZones(sku)
-		// !!! Important !!!
-		// Any changes to the values passed into the NewInstanceType method will require making updates to the cache key
-		// so that Karpenter is able to cache the set of InstanceTypes based on values that alter the set of instance types
-		// !!! Important !!!
-		instanceType := NewInstanceType(ctx, sku, vmsize, kc, p.region, p.createOfferings(sku, instanceTypeZones), nodeClass, architecture)
+		instanceType := newInstanceType(ctx, sku, vmsize, p.region, p.createOfferings(sku, instanceTypeZones), instanceTypeParams, architecture)
 		if len(instanceType.Offerings) == 0 {
 			continue
 		}
 
-		if !p.isInstanceTypeSupportedByFilters(sku, architecture, nodeClass) {
+		if !p.isInstanceTypeSupportedByFilters(sku, architecture, instanceTypeParams) {
 			continue
 		}
 
@@ -229,12 +240,25 @@ func (p *DefaultProvider) instanceTypeZones(sku *skewer.SKU) sets.Set[string] {
 //	offering.Requirements.Get(v1.TopologyLabelZone).Any()
 func (p *DefaultProvider) createOfferings(sku *skewer.SKU, offeringZones sets.Set[string]) cloudprovider.Offerings {
 	offerings := []*cloudprovider.Offering{}
+
 	for zone := range offeringZones {
 		placementScope := zones.PlacementScopeForZone(zone)
-		onDemandPrice, onDemandOk := p.pricingProvider.OnDemandPrice(*sku.Name)
-		spotPrice, spotOk := p.pricingProvider.SpotPrice(*sku.Name)
-		availableOnDemand := onDemandOk && !p.unavailableOfferings.IsUnavailable(sku, zone, karpv1.CapacityTypeOnDemand)
-		availableSpot := spotOk && !p.unavailableOfferings.IsUnavailable(sku, zone, karpv1.CapacityTypeSpot)
+
+		// Get prices for ordering; missing prices return MissingPrice (de-prioritized but not excluded).
+		onDemandPrice, _ := p.pricingProvider.OnDemandPrice(*sku.Name)
+		spotPrice, _ := p.pricingProvider.SpotPrice(*sku.Name)
+
+		// Determine allocatability from SKU capabilities.
+		// On-demand is always allocatable if the SKU passed UpdateInstanceTypes filters, we just need to check the unavailableOfferings cache.
+		availableOnDemand := !p.unavailableOfferings.IsUnavailable(sku, zone, karpv1.CapacityTypeOnDemand)
+		// Spot is only allocatable if the SKU reports LowPriorityCapable=True and the offering is not in the unavailableOfferings cache.
+		// IMPORTANT: Spot can be capacity restricted separately from dedicated. Unlike dedicated, spot capacity restrictions are not returned
+		// in the "restrictions" section of the SKU API, instead the LowPriorityCapable capability is set to False. This means that the VM SKU API cannot differentiate
+		// between restricted at a regional level and for all zones, or just restricted for some zones. Both are LowPriorityCapable=False. It would be
+		// nice to have the SKUs API fix this. Until it does, we _could_ try to join with spot price here and use the existence of a spot meter as
+		// supporting signal that actually the VM can be allocated as spot at the regional level. This seems an over-optimization for now though,
+		// so not doing it.
+		availableSpot := sku.IsLowPriorityCapable() && !p.unavailableOfferings.IsUnavailable(sku, zone, karpv1.CapacityTypeSpot)
 
 		onDemandOffering := &cloudprovider.Offering{
 			Requirements: scheduling.NewRequirements(
@@ -280,12 +304,12 @@ func (p *DefaultProvider) createOfferings(sku *skewer.SKU, offeringZones sets.Se
 
 // isInstanceTypeSupportedByFilters consolidates all per-NodeClass instance type
 // filters into a single call to keep the List() method's cyclomatic complexity low.
-func (p *DefaultProvider) isInstanceTypeSupportedByFilters(sku *skewer.SKU, architecture string, nodeClass *v1beta1.AKSNodeClass) bool {
-	return p.isInstanceTypeSupportedByImageFamily(sku.GetName(), lo.FromPtr(nodeClass.Spec.ImageFamily)) &&
-		p.isInstanceTypeSupportedByEncryptionAtHost(sku, nodeClass) &&
-		p.isInstanceTypeSupportedByLocalDNS(sku, nodeClass) &&
-		p.isInstanceTypeSupportedByGPUDriverMode(sku, nodeClass) &&
-		p.isInstanceTypeSupportedByArtifactStreaming(architecture, nodeClass)
+func (p *DefaultProvider) isInstanceTypeSupportedByFilters(sku *skewer.SKU, architecture string, params *instanceTypeParameters) bool {
+	return p.isInstanceTypeSupportedByImageFamily(sku.GetName(), params.ImageFamily) &&
+		p.isInstanceTypeSupportedByEncryptionAtHost(sku, params) &&
+		p.isInstanceTypeSupportedByLocalDNS(sku, params) &&
+		p.isInstanceTypeSupportedByGPUDriverMode(sku, params) &&
+		p.isInstanceTypeSupportedByArtifactStreaming(architecture, params)
 }
 
 func (p *DefaultProvider) isInstanceTypeSupportedByImageFamily(skuName, imageFamily string) bool {
@@ -304,9 +328,9 @@ func (p *DefaultProvider) isInstanceTypeSupportedByImageFamily(skuName, imageFam
 	}
 }
 
-func (p *DefaultProvider) isInstanceTypeSupportedByEncryptionAtHost(sku *skewer.SKU, nodeClass *v1beta1.AKSNodeClass) bool {
+func (p *DefaultProvider) isInstanceTypeSupportedByEncryptionAtHost(sku *skewer.SKU, params *instanceTypeParameters) bool {
 	// If EncryptionAtHost is not enabled in the nodeclass, all instance types are supported
-	if !nodeClass.GetEncryptionAtHost() {
+	if !params.EncryptionAtHost {
 		return true
 	}
 	// If EncryptionAtHost is enabled, only include instance types that support it
@@ -322,9 +346,11 @@ func (p *DefaultProvider) supportsEncryptionAtHost(sku *skewer.SKU) bool {
 	return strings.EqualFold(value, "True")
 }
 
-func (p *DefaultProvider) isInstanceTypeSupportedByLocalDNS(sku *skewer.SKU, nodeClass *v1beta1.AKSNodeClass) bool {
+func (p *DefaultProvider) isInstanceTypeSupportedByLocalDNS(sku *skewer.SKU, params *instanceTypeParameters) bool {
+	// Read the resolved state from Status.LocalDNSState. The
+	// nodeclass.localdns sub-reconciler is the sole writer.
 	// If LocalDNS won't be enabled, all instance types are supported
-	if !nodeClass.IsLocalDNSEnabled() {
+	if !params.LocalDNSEnabled {
 		return true
 	}
 
@@ -337,10 +363,10 @@ func (p *DefaultProvider) isInstanceTypeSupportedByLocalDNS(sku *skewer.SKU, nod
 	return memoryMiB(sku) >= 244 // 256 MB = 244.140625 MiB
 }
 
-func (p *DefaultProvider) isInstanceTypeSupportedByGPUDriverMode(sku *skewer.SKU, nodeClass *v1beta1.AKSNodeClass) bool {
+func (p *DefaultProvider) isInstanceTypeSupportedByGPUDriverMode(sku *skewer.SKU, params *instanceTypeParameters) bool {
 	// Only "Driver" mode filters out GPU SKUs without driver installation support.
 	// "None" mode allows all GPU SKUs.
-	if nodeClass.GetGPUMode() != v1beta1.GPUModeDriver {
+	if params.GPUMode != v1beta1.GPUModeDriver {
 		return true
 	}
 	name := sku.GetName()
@@ -355,9 +381,9 @@ func (p *DefaultProvider) isInstanceTypeSupportedByGPUDriverMode(sku *skewer.SKU
 // isInstanceTypeSupportedByArtifactStreaming filters out ARM64 instance types when artifact streaming
 // is explicitly enabled, since ARM64 does not support artifact streaming.
 // When artifact streaming is not set (nil/default) or explicitly disabled, all architectures are allowed.
-func (p *DefaultProvider) isInstanceTypeSupportedByArtifactStreaming(architecture string, nodeClass *v1beta1.AKSNodeClass) bool {
+func (p *DefaultProvider) isInstanceTypeSupportedByArtifactStreaming(architecture string, params *instanceTypeParameters) bool {
 	// Only filter when the user explicitly requested artifact streaming enabled
-	if !nodeClass.IsArtifactStreamingExplicitlyEnabled() {
+	if !params.ArtifactStreamingEnabled {
 		return true
 	}
 	// Artifact streaming is explicitly enabled; exclude ARM64 since it doesn't support it

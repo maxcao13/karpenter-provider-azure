@@ -74,6 +74,7 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/operator/options"
 	"github.com/Azure/karpenter-provider-azure/pkg/providers/instancetype"
 	"github.com/Azure/karpenter-provider-azure/pkg/providers/loadbalancer"
+	"github.com/Azure/karpenter-provider-azure/pkg/providers/pricing"
 	"github.com/Azure/karpenter-provider-azure/pkg/test"
 	. "github.com/Azure/karpenter-provider-azure/pkg/test/expectations"
 	"github.com/Azure/karpenter-provider-azure/pkg/utils"
@@ -100,7 +101,7 @@ func TestAzure(t *testing.T) {
 	RegisterFailHandler(Fail)
 
 	ctx = coreoptions.ToContext(ctx, coretest.Options())
-	ctx, stop = context.WithCancel(ctx)
+	ctx, stop = context.WithCancel(ctx) //nolint:gosec // G118: stop is called in AfterSuite
 	testOptions = test.Options()
 	ctx = options.ToContext(ctx, testOptions)
 	ctxBootstrap := options.ToContext(ctx, test.Options(test.OptionsFields{
@@ -718,6 +719,25 @@ var _ = Describe("InstanceType Provider", func() {
 				if k8sVersion != "" {
 					nodeClass.Status.KubernetesVersion = lo.ToPtr(k8sVersion)
 				}
+				// Mirror what the resolver would do: set Status.LocalDNSState=Enabled
+				// when the resolution would land on Enabled. The test instance-type
+				// provider uses a nil resolver, so Status is the only path to
+				// surface Enabled.
+				setEnabledStatus := func() {
+					nodeClass.Status.LocalDNSState = lo.ToPtr(v1beta1.LocalDNSStateEnabled)
+				}
+				switch localDNSMode {
+				case v1beta1.LocalDNSModeRequired:
+					setEnabledStatus()
+				case v1beta1.LocalDNSModeDisabled:
+					// no status needed; Disabled mode -> false
+				case v1beta1.LocalDNSModePreferred:
+					threshold := semver.MustParse("1.36.0")
+					parsed, perr := semver.ParseTolerant(strings.TrimPrefix(k8sVersion, "v"))
+					if perr == nil && parsed.GTE(threshold) {
+						setEnabledStatus()
+					}
+				}
 				ExpectApplied(ctx, env.Client, nodeClass)
 				instanceTypes, err := azureEnv.InstanceTypesProvider.List(ctx, nodeClass)
 				Expect(err).ToNot(HaveOccurred())
@@ -740,10 +760,10 @@ var _ = Describe("InstanceType Provider", func() {
 			},
 			Entry("when LocalDNS is required - filters to 4+ vCPUs and 244+ MiB",
 				v1beta1.LocalDNSModeRequired, "", false, true),
-			Entry("when LocalDNS is preferred with k8s >= 1.35 - filters to 4+ vCPUs and 244+ MiB",
-				v1beta1.LocalDNSModePreferred, "1.35.0", false, true),
-			Entry("when LocalDNS is preferred with k8s < 1.35 - includes all SKUs",
-				v1beta1.LocalDNSModePreferred, "1.34.0", true, true),
+			Entry("when LocalDNS is preferred with k8s >= 1.36 - filters to 4+ vCPUs and 244+ MiB",
+				v1beta1.LocalDNSModePreferred, "1.36.0", false, true),
+			Entry("when LocalDNS is preferred with k8s < 1.36 - includes all SKUs",
+				v1beta1.LocalDNSModePreferred, "1.35.0", true, true),
 			Entry("when LocalDNS is disabled - includes all SKUs",
 				v1beta1.LocalDNSModeDisabled, "", true, true),
 			Entry("when LocalDNS is not set - includes all SKUs",
@@ -805,7 +825,7 @@ var _ = Describe("InstanceType Provider", func() {
 						},
 					},
 				}
-				ExpectApplied(ctx, env.Client, nodeClassDisabled)
+				nodeClassDisabled.Status.LocalDNSState = lo.ToPtr(v1beta1.LocalDNSStateDisabled)
 				instanceTypesDisabled, err := azureEnv.InstanceTypesProvider.List(ctx, nodeClassDisabled)
 				Expect(err).ToNot(HaveOccurred())
 
@@ -862,6 +882,7 @@ var _ = Describe("InstanceType Provider", func() {
 						},
 					},
 				}
+				nodeClassEnabled.Status.LocalDNSState = lo.ToPtr(v1beta1.LocalDNSStateEnabled)
 				ExpectApplied(ctx, env.Client, nodeClassEnabled)
 				instanceTypesEnabled, err := azureEnv.InstanceTypesProvider.List(ctx, nodeClassEnabled)
 				Expect(err).ToNot(HaveOccurred())
@@ -1363,7 +1384,7 @@ var _ = Describe("InstanceType Provider", func() {
 					UseSIG: lo.ToPtr(true),
 				})
 				ctx = options.ToContext(ctx)
-				statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, azureEnv.SubnetsAPI, azureEnv.DiskEncryptionSetsAPI, options.ParsedDiskEncryptionSetID)
+				statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, env.KubernetesInterface, azureEnv.DynamicInterface, azureEnv.SubnetsAPI, azureEnv.DiskEncryptionSetsAPI, options.ParsedDiskEncryptionSetID, options.NetworkPolicy, options.NetworkPlugin)
 
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				ExpectObjectReconciled(ctx, env.Client, statusController, nodeClass)
@@ -1412,7 +1433,7 @@ var _ = Describe("InstanceType Provider", func() {
 					UseSIG: lo.ToPtr(true),
 				})
 				ctx = options.ToContext(ctx)
-				statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, azureEnv.SubnetsAPI, azureEnv.DiskEncryptionSetsAPI, options.ParsedDiskEncryptionSetID)
+				statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, env.KubernetesInterface, azureEnv.DynamicInterface, azureEnv.SubnetsAPI, azureEnv.DiskEncryptionSetsAPI, options.ParsedDiskEncryptionSetID, options.NetworkPolicy, options.NetworkPlugin)
 
 				nodeClass.Spec.ImageFamily = lo.ToPtr(imageFamily)
 				coretest.ReplaceRequirements(nodePool, karpv1.NodeSelectorRequirementWithMinValues{
@@ -1444,10 +1465,7 @@ var _ = Describe("InstanceType Provider", func() {
 			)
 			DescribeTable("should select the right image for a given instance type",
 				func(instanceType string, imageFamily string, expectedImageDefinition string, expectedGalleryURL string) {
-					statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, azureEnv.SubnetsAPI, azureEnv.DiskEncryptionSetsAPI, testOptions.ParsedDiskEncryptionSetID)
-					if expectUseAzureLinux3 && expectedImageDefinition == azureLinuxGen2ArmImageDefinition {
-						Skip("AzureLinux3 ARM64 VHD is not available in CIG")
-					}
+					statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, env.KubernetesInterface, azureEnv.DynamicInterface, azureEnv.SubnetsAPI, azureEnv.DiskEncryptionSetsAPI, testOptions.ParsedDiskEncryptionSetID, options.FromContext(ctx).NetworkPolicy, options.FromContext(ctx).NetworkPlugin)
 					nodeClass.Spec.ImageFamily = lo.ToPtr(imageFamily)
 					coretest.ReplaceRequirements(nodePool, karpv1.NodeSelectorRequirementWithMinValues{
 						Key:      v1.LabelInstanceTypeStable,
@@ -1981,7 +1999,7 @@ var _ = Describe("InstanceType Provider", func() {
 
 			It("should return error when instance type resolution fails", func() {
 				// Create and set up the status controller
-				statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, azureEnv.SubnetsAPI, azureEnv.DiskEncryptionSetsAPI, testOptions.ParsedDiskEncryptionSetID)
+				statusController := status.NewController(env.Client, azureEnv.KubernetesVersionProvider, azureEnv.ImageProvider, env.KubernetesInterface, env.KubernetesInterface, azureEnv.DynamicInterface, azureEnv.SubnetsAPI, azureEnv.DiskEncryptionSetsAPI, testOptions.ParsedDiskEncryptionSetID, options.FromContext(ctx).NetworkPolicy, options.FromContext(ctx).NetworkPlugin)
 
 				// Set NodeClass to Ready
 				nodeClass.StatusConditions().SetTrue(karpv1.ConditionTypeLaunched)
@@ -2348,7 +2366,7 @@ var _ = Describe("InstanceType Provider", func() {
 
 			Context("when driverInstallation is Install (default)", func() {
 				BeforeEach(func() {
-					// Default nodeClass has no GPU config → defaults to Install mode
+					// Default nodeClass has no GPU config -> defaults to Install mode
 					nodeClassDefault := test.AKSNodeClass()
 					ExpectApplied(ctx, env.Client, nodeClassDefault)
 					instanceTypes, err = azureEnv.InstanceTypesProvider.List(ctx, nodeClassDefault)
@@ -2446,6 +2464,115 @@ var _ = Describe("InstanceType Provider", func() {
 					// Standard_D2_v5 supports encryption at host and should be included
 					Expect(instanceTypes).Should(ContainElement(WithTransform(getName, Equal("Standard_D2_v5"))))
 				})
+			})
+		})
+
+		Context("Offering Availability", func() {
+			var instanceTypes corecloudprovider.InstanceTypes
+
+			BeforeEach(func() {
+				Expect(azureEnv.InstanceTypesProvider.UpdateInstanceTypes(ctx)).To(Succeed())
+				var err error
+				instanceTypes, err = azureEnv.InstanceTypesProvider.List(ctx, nodeClass)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			It("should not have spot offerings available for SKUs with LowPriorityCapable=False", func() {
+				// Standard_B20ms has LowPriorityCapable=False in the fake SKU data
+				var b20ms *corecloudprovider.InstanceType
+				for _, it := range instanceTypes {
+					if it.Name == "Standard_B20ms" {
+						b20ms = it
+						break
+					}
+				}
+				Expect(b20ms).ToNot(BeNil(), "Standard_B20ms should be in the instance type list")
+
+				// On-demand offerings should be available
+				onDemandAvailable := lo.Filter(b20ms.Offerings.Available(), func(o *corecloudprovider.Offering, _ int) bool {
+					return o.Requirements.Get(karpv1.CapacityTypeLabelKey).Has(karpv1.CapacityTypeOnDemand)
+				})
+				Expect(onDemandAvailable).ToNot(BeEmpty(), "on-demand offerings should be available for Standard_B20ms")
+
+				// Spot offerings should NOT be available (LowPriorityCapable=False)
+				spotAvailable := lo.Filter(b20ms.Offerings.Available(), func(o *corecloudprovider.Offering, _ int) bool {
+					return o.Requirements.Get(karpv1.CapacityTypeLabelKey).Has(karpv1.CapacityTypeSpot)
+				})
+				Expect(spotAvailable).To(BeEmpty(), "spot offerings should not be available for Standard_B20ms (LowPriorityCapable=False)")
+			})
+
+			It("should have available offerings for a SKU present in the SKU API but missing from pricing data", func() {
+				// Add a SKU to the fake SKU API that does NOT have pricing in the static pricing data.
+				// This simulates a new SKU appearing in the SKU API before pricing data is available.
+				// Standard_D2_v2_Promo is in known_skus.yaml but has no southcentralus pricing.
+				azureEnv.SKUsAPI.AdditionalSKUs = append(azureEnv.SKUsAPI.AdditionalSKUs, compute.ResourceSku{
+					Name:         lo.ToPtr("Standard_D2_v2_Promo"),
+					Tier:         lo.ToPtr("Standard"),
+					Kind:         lo.ToPtr(""),
+					Size:         lo.ToPtr("D2_v2_Promo"),
+					Family:       lo.ToPtr("standardDv2Family"),
+					ResourceType: lo.ToPtr("virtualMachines"),
+					APIVersions:  &[]string{},
+					Costs:        &[]compute.ResourceSkuCosts{},
+					Restrictions: &[]compute.ResourceSkuRestrictions{},
+					Capabilities: &[]compute.ResourceSkuCapabilities{
+						{Name: lo.ToPtr("MaxResourceVolumeMB"), Value: lo.ToPtr("102400")},
+						{Name: lo.ToPtr("OSVhdSizeMB"), Value: lo.ToPtr("1047552")},
+						{Name: lo.ToPtr("vCPUs"), Value: lo.ToPtr("2")},
+						{Name: lo.ToPtr("HyperVGenerations"), Value: lo.ToPtr("V1")},
+						{Name: lo.ToPtr("MemoryGB"), Value: lo.ToPtr("7")},
+						{Name: lo.ToPtr("MaxDataDiskCount"), Value: lo.ToPtr("8")},
+						{Name: lo.ToPtr("CpuArchitectureType"), Value: lo.ToPtr("x64")},
+						{Name: lo.ToPtr("LowPriorityCapable"), Value: lo.ToPtr("True")},
+						{Name: lo.ToPtr("PremiumIO"), Value: lo.ToPtr("True")},
+						{Name: lo.ToPtr("VMDeploymentTypes"), Value: lo.ToPtr("IaaS")},
+						{Name: lo.ToPtr("vCPUsAvailable"), Value: lo.ToPtr("2")},
+						{Name: lo.ToPtr("vCPUsPerCore"), Value: lo.ToPtr("1")},
+						{Name: lo.ToPtr("EphemeralOSDiskSupported"), Value: lo.ToPtr("False")},
+						{Name: lo.ToPtr("EncryptionAtHostSupported"), Value: lo.ToPtr("True")},
+						{Name: lo.ToPtr("AcceleratedNetworkingEnabled"), Value: lo.ToPtr("True")},
+						{Name: lo.ToPtr("RdmaEnabled"), Value: lo.ToPtr("False")},
+						{Name: lo.ToPtr("MaxNetworkInterfaces"), Value: lo.ToPtr("4")},
+					},
+					Locations:    &[]string{fake.Region},
+					LocationInfo: &[]compute.ResourceSkuLocationInfo{{Location: lo.ToPtr(fake.Region), Zones: &[]string{"1", "2", "3"}}},
+				})
+
+				// Verify this SKU has no known pricing
+				price, known := azureEnv.PricingProvider.OnDemandPrice("Standard_D2_v2_Promo")
+				Expect(known).To(BeFalse(), "Standard_D2_v2_Promo should not have known pricing")
+				Expect(price).To(BeNumerically("==", pricing.MissingPrice))
+
+				// Re-fetch instance types with the new SKU
+				Expect(azureEnv.InstanceTypesProvider.UpdateInstanceTypes(ctx)).To(Succeed())
+				updatedInstanceTypes, err := azureEnv.InstanceTypesProvider.List(ctx, nodeClass)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Find the new SKU in the list
+				var promoSKU *corecloudprovider.InstanceType
+				for _, it := range updatedInstanceTypes {
+					if it.Name == "Standard_D2_v2_Promo" {
+						promoSKU = it
+						break
+					}
+				}
+				Expect(promoSKU).ToNot(BeNil(), "Standard_D2_v2_Promo should appear in instance types even without pricing data")
+
+				// On-demand offerings should be available
+				onDemandAvailable := lo.Filter(promoSKU.Offerings.Available(), func(o *corecloudprovider.Offering, _ int) bool {
+					return o.Requirements.Get(karpv1.CapacityTypeLabelKey).Has(karpv1.CapacityTypeOnDemand)
+				})
+				Expect(onDemandAvailable).ToNot(BeEmpty(), "on-demand offerings should be available even without pricing data")
+
+				// Spot offerings should also be available
+				spotAvailable := lo.Filter(promoSKU.Offerings.Available(), func(o *corecloudprovider.Offering, _ int) bool {
+					return o.Requirements.Get(karpv1.CapacityTypeLabelKey).Has(karpv1.CapacityTypeSpot)
+				})
+				Expect(spotAvailable).ToNot(BeEmpty(), "spot offerings should be available for LowPriorityCapable=True SKU even without pricing data")
+
+				// Price should be MissingPrice
+				Expect(onDemandAvailable[0].Price).To(BeNumerically("==", pricing.MissingPrice))
+				Expect(spotAvailable[0].Price).To(BeNumerically("==", pricing.MissingPrice))
 			})
 		})
 
