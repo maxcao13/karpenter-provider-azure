@@ -6,4 +6,5 @@ RUN unset VERSION && make build
 
 FROM registry.ci.openshift.org/ocp/5.0:base-rhel9
 COPY --from=builder /go/bin/azure-karpenter-provider /usr/bin/
-CMD ["/usr/bin/azure-karpenter-provider"]
+
+ENTRYPOINT ["/usr/bin/azure-karpenter-provider"]

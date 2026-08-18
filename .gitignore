@@ -4,8 +4,6 @@ coverage.html
 *.test
 *.cpuprofile
 *.heapprofile
-go.work
-go.work.sum
 *.out
 
 # Environment
