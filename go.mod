@@ -62,7 +62,7 @@ require (
 	sigs.k8s.io/karpenter v1.15.1
 )
 
-replace sigs.k8s.io/karpenter => github.com/openshift/kubernetes-sigs-karpenter v0.0.0-20261110172752-280f26969b1f
+replace sigs.k8s.io/karpenter => github.com/maxcao13/karpenter v0.0.0-20261123115514-6217883b4549
 
 require (
 	cel.dev/expr v0.25.2 // indirect
